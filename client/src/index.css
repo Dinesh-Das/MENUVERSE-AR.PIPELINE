@@ -1,0 +1,75 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --page-bg: #090807;
+  --page-bg-soft: #16110c;
+  --cream: #f3e7cf;
+  --cream-strong: #fbf4e6;
+  --cream-muted: #dbc8a1;
+  --saffron: #d8a541;
+  --gold: #f2cf7f;
+  --ink: #1a140f;
+  --text: #f9f2e8;
+  --muted: #b8a694;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: Inter, system-ui, sans-serif;
+  color: var(--text);
+  background:
+    radial-gradient(circle at top right, rgba(216, 165, 65, 0.16), transparent 28%),
+    radial-gradient(circle at top left, rgba(242, 207, 127, 0.08), transparent 24%),
+    linear-gradient(180deg, #100c09 0%, #090807 70%);
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+@layer components {
+  .shell {
+    @apply mx-auto w-full max-w-7xl px-4 pb-12 pt-8 sm:px-6 lg:px-8;
+  }
+
+  .panel {
+    @apply rounded-[28px] border border-white/10 bg-white/[0.04] shadow-glow backdrop-blur-sm;
+  }
+
+  .cream-panel {
+    @apply rounded-[28px] border border-[#f5e7c8]/20 bg-[color:var(--cream)] text-[color:var(--ink)] shadow-glow;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center rounded-full bg-[color:var(--saffron)] px-5 py-2.5 text-sm font-semibold text-[color:var(--ink)] transition hover:brightness-110;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center rounded-full border border-white/15 bg-white/5 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-white/10;
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center rounded-full border border-[#2d2418] bg-[#130f0c] px-4 py-2 text-sm font-medium text-[#f8eedf] transition hover:border-[#d8a541]/40 hover:text-[#f6d58f];
+  }
+
+  .field {
+    @apply w-full rounded-2xl border border-[#2e261b] bg-[#110d09] px-4 py-3 text-sm text-white outline-none transition placeholder:text-[#7f705c] focus:border-[#d8a541];
+  }
+
+  .field-light {
+    @apply w-full rounded-2xl border border-[#d7c29a] bg-[#fffaf1] px-4 py-3 text-sm text-[#1a140f] outline-none transition placeholder:text-[#927f65] focus:border-[#d8a541];
+  }
+
+  .label {
+    @apply mb-2 block text-xs font-semibold uppercase tracking-[0.2em] text-[#8f7b67];
+  }
+}

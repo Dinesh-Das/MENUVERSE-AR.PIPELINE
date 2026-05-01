@@ -1,0 +1,21 @@
+{
+  "name": "menuverse-ar-pipeline",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "npm run dev:studio",
+    "dev:studio": "powershell -ExecutionPolicy Bypass -File scripts/dev-studio.ps1",
+    "dev:frontend": "npm run dev:client",
+    "dev:backend": "powershell -ExecutionPolicy Bypass -File scripts/dev-studio.ps1 -BackendOnly",
+    "dev:client": "node scripts/serve-client.mjs",
+    "dev:server": "cmd /c \"cd server && npm run dev\"",
+    "dev:worker": "node worker/dev-runner.mjs",
+    "setup:windows": "powershell -ExecutionPolicy Bypass -File scripts/setup-windows.ps1",
+    "start:windows": "powershell -ExecutionPolicy Bypass -File scripts/start-studio.ps1",
+    "prisma:migrate": "cmd /c \"cd server && npm run prisma:migrate\"",
+    "prisma:studio": "cmd /c \"cd server && npm run prisma:studio\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

@@ -1,0 +1,58 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model FoodModel {
+  id               String   @id @default(cuid())
+  menuItemId       String?
+  name             String
+  description      String?
+  category         String?
+
+  sourceType       String   @default("MODEL_UPLOAD")
+  sourceVideoUrl   String?
+  sourceVideoFileName String?
+  sourceVideoFileSize Int?
+  sourceVideoDuration Float?
+  frameCount       Int?
+  processingNotes  String?
+
+  originalFileUrl  String?
+  processedFileUrl String?
+  thumbnailUrl     String?
+
+  fileName         String?
+  fileType         String?
+  fileSize         Int?
+
+  scale            Float    @default(1)
+  rotationX        Float    @default(0)
+  rotationY        Float    @default(0)
+  rotationZ        Float    @default(0)
+
+  positionX        Float    @default(0)
+  positionY        Float    @default(0)
+  positionZ        Float    @default(0)
+
+  polygonCount     Int?
+  textureCount     Int?
+  dimensions       String?
+
+  status           String   @default("UPLOADED")
+  isOptimized      Boolean  @default(false)
+  isARReady        Boolean  @default(false)
+  isActive         Boolean  @default(true)
+
+  errorMessage     String?
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([menuItemId])
+  @@index([status])
+}
