@@ -1,3 +1,5 @@
+import { buildUploadPublicUrl } from "../utils/fileStorage.js";
+
 const numericFields = [
   "scale",
   "rotationX",
@@ -94,7 +96,12 @@ function normalizeNumber(value, field) {
 export function serializeModel(model) {
   return {
     ...model,
-    dimensions: parseDimensions(model.dimensions)
+    dimensions: parseDimensions(model.dimensions),
+    // Asset paths stay relative in the DB; expand them here so every API response uses stable public URLs.
+    sourceVideoUrl: buildUploadPublicUrl(model.sourceVideoUrl),
+    originalFileUrl: buildUploadPublicUrl(model.originalFileUrl),
+    processedFileUrl: buildUploadPublicUrl(model.processedFileUrl),
+    thumbnailUrl: buildUploadPublicUrl(model.thumbnailUrl),
   };
 }
 
@@ -144,8 +151,8 @@ export function buildMenuverseResponse(model) {
     id: model.id,
     menuItemId: model.menuItemId,
     name: model.name,
-    modelUrl: model.processedFileUrl ?? model.originalFileUrl,
-    thumbnailUrl: model.thumbnailUrl,
+    modelUrl: buildUploadPublicUrl(model.processedFileUrl ?? model.originalFileUrl),
+    thumbnailUrl: buildUploadPublicUrl(model.thumbnailUrl),
     isARReady: model.isARReady,
     scale: model.scale,
     rotation: {

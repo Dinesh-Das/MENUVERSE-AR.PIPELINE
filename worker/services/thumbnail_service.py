@@ -2,22 +2,37 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from core.config import settings
 
 
-def _safe_font(size: int) -> ImageFont.ImageFont:
-    try:
-        return ImageFont.truetype("arial.ttf", size)
-    except OSError:
-        return ImageFont.load_default()
+def _safe_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    # FIX: relying on arial.ttf alone made Linux thumbnails fall back to Pillow's tiny bitmap font and ignore the requested size.
+    candidates = [
+        "arial.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/Library/Fonts/Arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    ]
+
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            continue
+
+    return ImageFont.load_default()
 
 
 def generate_placeholder_thumbnail(model_id: str, dish_name: str, file_name: str) -> Path:
     settings.thumbnails_dir.mkdir(parents=True, exist_ok=True)
 
-    output_path = settings.thumbnails_dir / f"{model_id}.png"
+    # Thumbnails need to be keyed by modelId so the API and client can locate them deterministically.
+    output_path = settings.thumbnails_dir / f"{model_id}.jpg"
     image = Image.new("RGB", (1200, 900), color="#f6ecd7")
     draw = ImageDraw.Draw(image)
 
@@ -29,7 +44,8 @@ def generate_placeholder_thumbnail(model_id: str, dish_name: str, file_name: str
 
     draw.rounded_rectangle((110, 470, 1090, 780), radius=28, fill="#f9f4ea")
     draw.text((160, 535), "Placeholder thumbnail", fill="#101010", font=_safe_font(32))
-    draw.text(
+    # FIX: spacing is only respected by multiline_text(), so using text() with a newline produced inconsistent placeholder copy layout.
+    draw.multiline_text(
         (160, 600),
         "The MVP uses Pillow for generated thumbnails.\nSwap this with Blender rendering later for photoreal previews.",
         fill="#4c4c4c",
@@ -37,20 +53,17 @@ def generate_placeholder_thumbnail(model_id: str, dish_name: str, file_name: str
         spacing=12,
     )
 
-    image.save(output_path, format="PNG")
+    square = ImageOps.fit(image, (512, 512), method=Image.LANCZOS)
+    square.save(output_path, format="JPEG", quality=90)
     return output_path
 
 
 def save_image_thumbnail(model_id: str, image: Image.Image) -> Path:
     settings.thumbnails_dir.mkdir(parents=True, exist_ok=True)
-    output_path = settings.thumbnails_dir / f"{model_id}.png"
+    output_path = settings.thumbnails_dir / f"{model_id}.jpg"
 
     preview = image.convert("RGB")
-    preview.thumbnail((1200, 1200))
-    canvas = Image.new("RGB", (1200, 900), color="#0f0d0a")
-
-    offset_x = max(0, (canvas.width - preview.width) // 2)
-    offset_y = max(0, (canvas.height - preview.height) // 2)
-    canvas.paste(preview, (offset_x, offset_y))
-    canvas.save(output_path, format="PNG")
+    # thumbnail() only preserves aspect ratio; fit() gives the square crop the frontend expects.
+    square = ImageOps.fit(preview, (512, 512), method=Image.LANCZOS)
+    square.save(output_path, format="JPEG", quality=90)
     return output_path

@@ -72,7 +72,13 @@ async function drainQueue() {
     activeModelIds.add(nextModelId);
 
     void runModelJob(nextModelId)
-      .catch(() => null)
+      .catch((err) => {
+        /* # FIX: swallowing queue-level failures made stuck PROCESSING jobs impossible to diagnose when the failure handler itself broke. */
+        console.error(
+          `[queue] Unhandled error for model ${nextModelId}:`,
+          err?.message ?? err
+        );
+      })
       .finally(() => {
         activeModelIds.delete(nextModelId);
         scheduleDrain();

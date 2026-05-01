@@ -1,22 +1,17 @@
 import { prisma } from "../lib/prisma.js";
 import { env } from "../config/env.js";
-import { fileUrlToAbsolutePath } from "../utils/fileStorage.js";
+import { fileUrlToAbsolutePath, normalizeUploadRelativePath } from "../utils/fileStorage.js";
 
 function workerUnavailableMessage() {
   return `Worker service is unavailable at ${env.workerUrl}. Start the Python worker and confirm ${env.workerUrl}/health is reachable.`;
 }
 
-function normalizeWorkerFileUrl(fileUrl) {
-  if (!fileUrl) {
+function normalizeWorkerRelativePath(filePath) {
+  if (!filePath) {
     return null;
   }
 
-  if (fileUrl.startsWith("http://") || fileUrl.startsWith("https://")) {
-    return fileUrl;
-  }
-
-  const normalized = fileUrl.startsWith("/") ? fileUrl : `/${fileUrl}`;
-  return `${env.publicBaseUrl}${normalized}`;
+  return normalizeUploadRelativePath(filePath);
 }
 
 function serializeWorkerDimensions(dimensions) {
@@ -75,43 +70,36 @@ export async function markModelFailed(modelId, errorMessage) {
 }
 
 function buildProcessingUpdate(payload) {
+  const metadata = payload.metadata ?? {};
+  const failedStatus = payload.status === "FAILED";
+  const processingNotes = payload.processingNotes
+    ?? (failedStatus ? `Processing failed. ${payload.error ?? "Unknown worker error."}` : null);
+
   const data = {
-    polygonCount: typeof payload.polygonCount === "number" ? payload.polygonCount : null,
-    textureCount: typeof payload.textureCount === "number" ? payload.textureCount : null,
-    dimensions: serializeWorkerDimensions(payload.dimensions),
+    polygonCount: typeof metadata.faceCount === "number" ? metadata.faceCount : null,
+    textureCount: null,
+    dimensions: serializeWorkerDimensions(metadata.boundingBox),
     frameCount: typeof payload.frameCount === "number" ? payload.frameCount : null,
-    processingNotes: payload.processingNotes ?? null,
+    processingNotes,
     isOptimized: Boolean(payload.isOptimized),
     status: payload.status ?? "PROCESSED",
-    errorMessage: null
+    errorMessage: failedStatus ? (payload.error ?? "Worker processing failed.") : null
   };
 
-  if (payload.originalFileUrl) {
-    data.originalFileUrl = normalizeWorkerFileUrl(payload.originalFileUrl);
+  if (payload.processedPath) {
+    data.processedFileUrl = normalizeWorkerRelativePath(payload.processedPath);
   }
 
-  if (payload.processedFileUrl) {
-    data.processedFileUrl = normalizeWorkerFileUrl(payload.processedFileUrl);
-  }
-
-  if (payload.thumbnailUrl) {
-    data.thumbnailUrl = normalizeWorkerFileUrl(payload.thumbnailUrl);
-  }
-
-  if (payload.fileName) {
-    data.fileName = payload.fileName;
-  }
-
-  if (payload.fileType) {
-    data.fileType = payload.fileType;
-  }
-
-  if (typeof payload.fileSize === "number") {
-    data.fileSize = payload.fileSize;
+  if (payload.thumbnailPath) {
+    data.thumbnailUrl = normalizeWorkerRelativePath(payload.thumbnailPath);
   }
 
   if (typeof payload.sourceVideoDuration === "number") {
     data.sourceVideoDuration = payload.sourceVideoDuration;
+  }
+
+  if (typeof metadata.fileSize === "number") {
+    data.fileSize = metadata.fileSize;
   }
 
   return data;
@@ -145,7 +133,8 @@ export async function processUploadedModel(model) {
     "Worker processing failed."
   );
 
-  return prisma.foodModel.update({
+  // Await the Prisma write here so queued jobs do not resolve while the DB still says PROCESSING.
+  return await prisma.foodModel.update({
     where: { id: model.id },
     data: buildProcessingUpdate(payload)
   });
@@ -178,7 +167,8 @@ export async function processUploadedVideo(model) {
     "Worker video processing failed."
   );
 
-  return prisma.foodModel.update({
+  // FAILED worker responses should only update the row once; we do not schedule implicit retries here.
+  return await prisma.foodModel.update({
     where: { id: model.id },
     data: buildProcessingUpdate(payload)
   });

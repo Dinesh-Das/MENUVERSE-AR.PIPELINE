@@ -9,36 +9,45 @@ export function ensureUploadDirs() {
   }
 }
 
-export function createPublicUrl(relativePath) {
-  const normalized = relativePath.startsWith("/") ? relativePath : `/${relativePath}`;
-  return `${env.publicBaseUrl}${normalized}`;
+export function normalizeUploadRelativePath(fileReference) {
+  if (!fileReference) {
+    return null;
+  }
+
+  let pathname = fileReference;
+
+  try {
+    pathname = new URL(fileReference).pathname;
+  } catch {
+    pathname = fileReference;
+  }
+
+  const normalized = pathname
+    .replace(/\\/g, "/")
+    .replace(/^\/+/, "")
+    .replace(/^uploads\//i, "");
+
+  const resolved = path.resolve(env.uploadRoot, normalized);
+  if (!resolved.startsWith(env.uploadRoot)) {
+    return null;
+  }
+
+  return normalized;
 }
 
-export function createUploadPublicUrl(folderName, fileName) {
-  return createPublicUrl(`/uploads/${folderName}/${fileName}`);
+export function buildUploadPublicUrl(relativePath) {
+  const normalized = normalizeUploadRelativePath(relativePath);
+  return normalized ? `${env.publicBaseUrl}/uploads/${normalized}` : null;
+}
+
+export function createUploadRelativePath(folderName, fileName) {
+  // DB records should keep upload-root-relative paths so the API can rebuild public URLs consistently per environment.
+  return `${folderName}/${fileName}`;
 }
 
 export function fileUrlToAbsolutePath(fileUrl) {
-  if (!fileUrl) {
-    return null;
-  }
-
-  let pathname = fileUrl;
-
-  try {
-    pathname = new URL(fileUrl).pathname;
-  } catch {
-    pathname = fileUrl;
-  }
-
-  const relativePath = pathname.replace(/^\/+/, "");
-  const fullPath = path.resolve(env.projectRoot, relativePath);
-
-  if (!fullPath.startsWith(env.uploadRoot)) {
-    return null;
-  }
-
-  return fullPath;
+  const relativePath = normalizeUploadRelativePath(fileUrl);
+  return relativePath ? path.resolve(env.uploadRoot, relativePath) : null;
 }
 
 export async function safeUnlink(fileUrl) {

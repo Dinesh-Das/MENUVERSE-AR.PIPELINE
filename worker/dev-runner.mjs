@@ -9,7 +9,7 @@ const localPackageDir = path.join(workerRoot, ".python-packages");
 const localWindowsPython = path.join(workerRoot, ".venv", "Scripts", "python.exe");
 const localUnixPython = path.join(workerRoot, ".venv", "bin", "python");
 const libreOfficePython = "C:\\Program Files\\LibreOffice\\program\\python.exe";
-const dependencyProbeCode = "import importlib.util, fastapi, imageio, trimesh, PIL, scipy, onnxruntime, pydantic_core._pydantic_core; assert importlib.util.find_spec('rembg') is not None; print('worker-runtime-ok')";
+const dependencyProbeCode = "import importlib.util, cv2, fastapi, imageio, trimesh, PIL, scipy, onnxruntime, pydantic_core._pydantic_core; assert importlib.util.find_spec('rembg') is not None; print('worker-runtime-ok')";
 
 function buildEnv() {
   const existingPythonPath = process.env.PYTHONPATH;

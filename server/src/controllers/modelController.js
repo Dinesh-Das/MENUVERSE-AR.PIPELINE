@@ -2,7 +2,7 @@ import { prisma } from "../lib/prisma.js";
 import path from "node:path";
 import { buildMenuverseResponse, buildValidatedCreatePayload, sanitizeModelUpdatePayload, serializeModel } from "../services/modelService.js";
 import { enqueueModelProcessing } from "../services/processingQueue.js";
-import { createUploadPublicUrl, safeRemoveDirAbsolute, safeUnlink, safeUnlinkAbsolute } from "../utils/fileStorage.js";
+import { createUploadRelativePath, safeRemoveDirAbsolute, safeUnlink, safeUnlinkAbsolute } from "../utils/fileStorage.js";
 import { validateUploadedAsset } from "../utils/uploadValidation.js";
 import { env } from "../config/env.js";
 
@@ -31,7 +31,7 @@ export async function uploadModel(request, response, next) {
         status: "QUEUED",
         processingNotes: "Model upload received and queued for background processing.",
         ...payload,
-        originalFileUrl: createUploadPublicUrl("models", request.file.filename),
+        originalFileUrl: createUploadRelativePath("models", request.file.filename),
         fileName: request.file.filename,
         fileType: request.file.mimetype || "model/gltf-binary",
         fileSize: request.file.size
@@ -78,7 +78,7 @@ export async function uploadVideo(request, response, next) {
         sourceType: "VIDEO_UPLOAD",
         status: "QUEUED",
         ...payload,
-        sourceVideoUrl: createUploadPublicUrl("videos", request.file.filename),
+        sourceVideoUrl: createUploadRelativePath("videos", request.file.filename),
         sourceVideoFileName: request.file.filename,
         sourceVideoFileSize: request.file.size,
         processingNotes: "Video uploaded and queued for background processing."

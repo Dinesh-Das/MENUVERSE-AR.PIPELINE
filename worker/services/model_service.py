@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import shutil
 from pathlib import Path
 
@@ -11,10 +12,45 @@ from services.thumbnail_service import generate_placeholder_thumbnail
 
 
 ALLOWED_EXTENSIONS = {".glb", ".gltf"}
+GLB_MAGIC = b"glTF"
+logger = logging.getLogger(__name__)
 
 
-def _public_path(folder_name: str, file_name: str) -> str:
-    return f"/uploads/{folder_name}/{file_name}"
+def relative_upload_path(file_path: Path) -> str:
+    # The worker must return upload-root-relative paths so the Express API can build the public URL consistently.
+    return file_path.resolve().relative_to(settings.upload_root.resolve()).as_posix()
+
+
+def _is_valid_model_signature(path: Path) -> bool:
+    try:
+        if path.suffix.lower() == ".glb":
+            with path.open("rb") as handle:
+                # GLB files must start with the 4-byte magic 0x676C5446 at offset 0, not later in the file.
+                return handle.read(4) == GLB_MAGIC
+
+        if path.suffix.lower() == ".gltf":
+            return path.read_text(encoding="utf8").lstrip().startswith("{")
+    except OSError:
+        return False
+
+    return False
+
+
+def _coerce_loaded_to_mesh(loaded: object) -> trimesh.Trimesh | None:
+    if isinstance(loaded, trimesh.Scene):
+        concatenated = loaded.dump(concatenate=True)
+        return concatenated if isinstance(concatenated, trimesh.Trimesh) else None
+
+    if isinstance(loaded, trimesh.Trimesh):
+        return loaded
+
+    return None
+
+
+def _inspect_mesh(file_path: Path) -> trimesh.Trimesh | None:
+    loaded = trimesh.load(file_path, force="mesh")
+    # Some GLBs still come back as Scene objects, so flatten them before reading vertices/faces.
+    return _coerce_loaded_to_mesh(loaded)
 
 
 def validate_model_path(file_path: str) -> dict:
@@ -27,54 +63,46 @@ def validate_model_path(file_path: str) -> dict:
         "filePath": str(path),
         "fileName": path.name,
         "extension": extension,
-        "isSupported": extension in ALLOWED_EXTENSIONS,
+        "isSupported": extension in ALLOWED_EXTENSIONS and exists and _is_valid_model_signature(path),
         "fileSize": path.stat().st_size if exists else 0,
     }
 
 
 def inspect_model(file_path: Path) -> dict:
-    polygon_count = None
-    texture_count = None
-    dimensions = None
-
     try:
-        loaded = trimesh.load(file_path, force="scene")
-        geometries = list(getattr(loaded, "geometry", {}).values()) if hasattr(loaded, "geometry") else [loaded]
-
-        polygon_count = 0
-        texture_count = 0
-
-        extents = []
-
-        for geometry in geometries:
-            if hasattr(geometry, "faces") and geometry.faces is not None:
-                polygon_count += int(len(geometry.faces))
-
-            if hasattr(geometry, "visual") and getattr(geometry.visual, "material", None) is not None:
-                texture_count += 1
-
-            if hasattr(geometry, "extents") and geometry.extents is not None:
-                extents.append(geometry.extents)
-
-        if extents:
-            max_x = max(float(extent[0]) for extent in extents)
-            max_y = max(float(extent[1]) for extent in extents)
-            max_z = max(float(extent[2]) for extent in extents)
-            dimensions = {
-                "x": round(max_x, 4),
-                "y": round(max_y, 4),
-                "z": round(max_z, 4),
+        mesh = _inspect_mesh(file_path)
+        if mesh is None:
+            return {
+                "vertexCount": None,
+                "faceCount": None,
+                "fileSize": file_path.stat().st_size if file_path.exists() else None,
+                "boundingBox": None,
             }
-    except Exception:
-        polygon_count = None
-        texture_count = None
-        dimensions = None
 
-    return {
-        "polygonCount": polygon_count,
-        "textureCount": texture_count,
-        "dimensions": dimensions,
-    }
+        extents = mesh.bounding_box.extents if mesh.bounding_box is not None else None
+        bounding_box = None
+        if extents is not None:
+            bounding_box = {
+                "x": round(float(extents[0]), 4),
+                "y": round(float(extents[1]), 4),
+                "z": round(float(extents[2]), 4),
+            }
+
+        return {
+            "vertexCount": int(len(mesh.vertices)) if mesh.vertices is not None else None,
+            "faceCount": int(len(mesh.faces)) if mesh.faces is not None else None,
+            "fileSize": file_path.stat().st_size if file_path.exists() else None,
+            "boundingBox": bounding_box,
+        }
+    except Exception:
+        # FIX: trimesh inspection failures used to disappear silently, leaving the dashboard with no clue why metadata was missing.
+        logger.warning("inspect_model: trimesh failed to inspect %s", file_path, exc_info=True)
+        return {
+            "vertexCount": None,
+            "faceCount": None,
+            "fileSize": file_path.stat().st_size if file_path.exists() else None,
+            "boundingBox": None,
+        }
 
 
 def generate_thumbnail(payload: GenerateThumbnailRequest) -> dict:
@@ -85,7 +113,7 @@ def generate_thumbnail(payload: GenerateThumbnailRequest) -> dict:
     )
 
     return {
-        "thumbnailUrl": _public_path("thumbnails", thumbnail_path.name)
+        "thumbnailPath": relative_upload_path(thumbnail_path)
     }
 
 
@@ -106,7 +134,7 @@ def process_model(payload: ProcessModelRequest) -> dict:
     processed_path = settings.processed_dir / processed_name
     shutil.copy2(source_path, processed_path)
 
-    metadata = inspect_model(source_path)
+    metadata = inspect_model(processed_path)
     thumbnail = generate_thumbnail(
         GenerateThumbnailRequest(
             filePath=str(source_path),
@@ -116,16 +144,11 @@ def process_model(payload: ProcessModelRequest) -> dict:
     )
 
     return {
-        "processedFileUrl": _public_path("processed", processed_path.name),
-        "thumbnailUrl": thumbnail["thumbnailUrl"],
-        "fileName": processed_path.name,
-        "fileType": payload.fileType,
-        "fileSize": processed_path.stat().st_size,
-        "polygonCount": metadata["polygonCount"],
-        "textureCount": metadata["textureCount"],
-        "dimensions": metadata["dimensions"],
-        "isOptimized": False,
         "status": "PROCESSED",
+        "processedPath": relative_upload_path(processed_path),
+        "thumbnailPath": thumbnail["thumbnailPath"],
+        "metadata": metadata,
         "processingNotes": "Uploaded model validated and copied into the processed directory.",
         "validation": validation,
+        "isOptimized": False,
     }

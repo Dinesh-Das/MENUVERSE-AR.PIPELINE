@@ -27,7 +27,7 @@ function Assert-PortAvailable {
 
     $pids = @(Get-ListeningPids -Port $Port)
     if ($pids.Count -gt 0) {
-        throw "$Name port $Port is already in use by PID(s): $($pids -join ', '). Stop the existing process and try again."
+        throw "$Name port $Port is already in use by PID(s): $($pids -join ', '). Run 'npm run kill-ports' to clear them, then try again."
     }
 }
 

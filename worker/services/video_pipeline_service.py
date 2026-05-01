@@ -1,27 +1,33 @@
 from __future__ import annotations
 
+import logging
+import math
+import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from shutil import which
-from functools import lru_cache
 
-import imageio.v2 as imageio
+import cv2
 import numpy as np
 import trimesh
 from PIL import Image, ImageFilter
+from scipy.spatial import Delaunay
 from trimesh.transformations import rotation_matrix
 
 from core.config import settings
 from schemas import ProcessVideoRequest
-from services.model_service import inspect_model
+from services.model_service import inspect_model, relative_upload_path
 from services.thumbnail_service import save_image_thumbnail
 
 
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
 MIN_RECONSTRUCTION_FRAMES = 12
 PIPELINE_MODES = {"auto", "photogrammetry", "proxy"}
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -30,10 +36,8 @@ class SampledFramePaths:
     guided_dir: Path
     saved_frame_count: int
     guided_frame_count: int
-
-
-def _public_path(folder_name: str, file_name: str) -> str:
-    return f"/uploads/{folder_name}/{file_name}"
+    original_edge_density: float
+    guided_edge_density: float
 
 
 def _tail_command_output(text: str, max_lines: int = 20) -> str:
@@ -168,6 +172,39 @@ def _build_guided_frame(image: Image.Image, rembg_session: object) -> Image.Imag
     return Image.composite(original_rgb, darkened_background, softened_alpha)
 
 
+def _write_jpeg_frame(output_path: Path, rgb_frame: np.ndarray) -> None:
+    # JPEG keeps sampled-frame storage within the 48-frame budget far better than lossless PNG for phone videos.
+    bgr_frame = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
+    cv2.imwrite(str(output_path.with_suffix(".jpg")), bgr_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+
+
+def _read_frame_with_retry(capture: cv2.VideoCapture) -> tuple[bool, np.ndarray | None]:
+    for attempt in range(3):
+        success, frame = capture.read()
+        if success and frame is not None:
+            return True, frame
+
+        # OpenCV can drop the first decode while the codec warms up, so retry briefly before giving up.
+        time.sleep(0.05)
+
+    return False, None
+
+
+def _select_thumbnail_frame(sampled_frames: list[np.ndarray]) -> np.ndarray:
+    # Some codecs decode a near-black opener frame, so prefer the first non-black decoded frame for thumbnails.
+    for frame in sampled_frames:
+        if float(frame.mean()) > 10:
+            return frame
+
+    return sampled_frames[1] if len(sampled_frames) > 1 else sampled_frames[0]
+
+
+def _edge_density(frame: np.ndarray) -> float:
+    grayscale = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+    edges = cv2.Canny(grayscale, threshold1=60, threshold2=180)
+    return float(np.count_nonzero(edges)) / float(edges.size) if edges.size else 0.0
+
+
 def _sample_frames(video_path: Path, model_id: str) -> tuple[list[np.ndarray], int, float | None, Path, SampledFramePaths]:
     frames_root = settings.frames_dir / model_id
     original_images_dir = frames_root / "images-original"
@@ -179,17 +216,24 @@ def _sample_frames(video_path: Path, model_id: str) -> tuple[list[np.ndarray], i
     original_images_dir.mkdir(parents=True, exist_ok=True)
     guided_images_dir.mkdir(parents=True, exist_ok=True)
 
-    reader = imageio.get_reader(str(video_path))
-    meta = reader.get_meta_data()
-    fps = float(meta.get("fps") or 0) if meta else 0
-    duration = float(meta.get("duration")) if meta and meta.get("duration") else None
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        raise ValueError("The uploaded video could not be opened for frame sampling.")
 
-    target_fps = settings.video_frame_sampling_fps if settings.video_frame_sampling_fps > 0 else 2
+    fps = float(capture.get(cv2.CAP_PROP_FPS) or 0)
+    total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    # FIX: preserve a real 0.0 duration instead of coercing it to None when the container reports zero-length metadata.
+    duration = float(total_frames / fps) if fps > 0 and total_frames >= 0 else None
+
+    # Sampling FPS comes from env, but it must be treated as a number before computing frame intervals.
+    target_fps = float(settings.video_frame_sampling_fps) if settings.video_frame_sampling_fps > 0 else 2.0
     sample_interval = max(1, int(round(fps / target_fps))) if fps > 0 else 12
 
     sampled_frames: list[np.ndarray] = []
     frame_count = 0
     guided_frame_count = 0
+    original_edge_density_total = 0.0
+    guided_edge_density_total = 0.0
 
     rembg_session = None
     try:
@@ -200,21 +244,26 @@ def _sample_frames(video_path: Path, model_id: str) -> tuple[list[np.ndarray], i
         rembg_session = None
 
     try:
-        for index, frame in enumerate(reader):
-            frame_count += 1
-
-            if frame_count > settings.video_max_analyzed_frames:
+        while frame_count < settings.video_max_analyzed_frames and len(sampled_frames) < settings.video_max_saved_frames:
+            success, frame = _read_frame_with_retry(capture)
+            if not success:
+                if frame_count == 0:
+                    raise ValueError("The uploaded video could not be decoded into frames.")
                 break
 
-            if index % sample_interval != 0 or len(sampled_frames) >= settings.video_max_saved_frames:
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+            if frame_count % sample_interval != 0:
+                frame_count += 1
                 continue
 
-            rgb_frame = np.asarray(frame[:, :, :3], dtype=np.uint8)
+            frame_count += 1
             processed_frame, image = _resize_frame_for_processing(rgb_frame)
 
             frame_file_name = f"frame_{len(sampled_frames) + 1:04d}.jpg"
-            image.save(original_images_dir / frame_file_name, quality=94)
             sampled_frames.append(processed_frame)
+            _write_jpeg_frame(original_images_dir / frame_file_name, processed_frame)
+            original_edge_density_total += _edge_density(processed_frame)
 
             if rembg_session is not None:
                 try:
@@ -222,37 +271,46 @@ def _sample_frames(video_path: Path, model_id: str) -> tuple[list[np.ndarray], i
                 except Exception:
                     continue
 
-                guided_frame.save(guided_images_dir / frame_file_name, quality=94)
+                guided_frame_array = np.asarray(guided_frame, dtype=np.uint8)
+                _write_jpeg_frame(guided_images_dir / frame_file_name, guided_frame_array)
                 guided_frame_count += 1
+                guided_edge_density_total += _edge_density(guided_frame_array)
     finally:
-        reader.close()
+        capture.release()
 
     return sampled_frames, frame_count, duration, frames_root, SampledFramePaths(
         original_dir=original_images_dir,
         guided_dir=guided_images_dir,
         saved_frame_count=len(sampled_frames),
         guided_frame_count=guided_frame_count,
+        original_edge_density=(original_edge_density_total / len(sampled_frames)) if sampled_frames else 0.0,
+        guided_edge_density=(guided_edge_density_total / guided_frame_count) if guided_frame_count else 0.0,
     )
 
 
 def _run_command(command: list[str], cwd: Path, label: str) -> None:
-    result = subprocess.run(
-        command,
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    if result.returncode == 0:
-        return
-
-    details = _tail_command_output(result.stderr or result.stdout)
-    suffix = f" Details:\n{details}" if details else ""
-    raise RuntimeError(f"{label} failed with exit code {result.returncode}.{suffix}")
+    try:
+        # check=True ensures a non-zero COLMAP exit aborts this pass immediately instead of silently producing empty outputs.
+        subprocess.run(
+            command,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as error:
+        details = _tail_command_output(error.stderr or error.stdout or "")
+        suffix = f" Details:\n{details}" if details else ""
+        raise RuntimeError(f"{label} failed with exit code {error.returncode}.{suffix}") from error
 
 
 def _find_sparse_component(sparse_root: Path) -> Path:
+    if not sparse_root.exists() or not any(sparse_root.rglob("*")):
+        logger.warning("COLMAP sparse output was missing or empty at %s; falling back to proxy geometry.", sparse_root)
+        raise RuntimeError(
+            "COLMAP sparse output was empty, so the reconstruction will fall back to proxy geometry."
+        )
+
     components = sorted(
         path for path in sparse_root.iterdir()
         if path.is_dir() and (path / "images.bin").exists()
@@ -294,6 +352,10 @@ def _maybe_simplify_mesh(colmap_path: str, workspace_root: Path, mesh_path: Path
     return simplified_path if simplified_path.exists() else mesh_path
 
 
+def _directory_has_files(directory: Path) -> bool:
+    return directory.exists() and any(path.is_file() for path in directory.rglob("*"))
+
+
 def _loaded_to_scene(loaded: object) -> trimesh.Scene | None:
     if isinstance(loaded, trimesh.Scene):
         return loaded if len(loaded.geometry) > 0 else None
@@ -318,6 +380,13 @@ def _scene_from_mesh_path(mesh_path: Path) -> trimesh.Scene | None:
     return _loaded_to_scene(loaded)
 
 
+def _scene_to_y_up(scene: trimesh.Scene) -> trimesh.Scene:
+    rotated = scene.copy()
+    # COLMAP meshes tend to arrive Z-up; rotate them into glTF's Y-up convention before export.
+    rotated.apply_transform(trimesh.transformations.rotation_matrix(-math.pi / 2, [1, 0, 0]))
+    return rotated
+
+
 def _build_convex_hull_scene_from_point_cloud(point_cloud_path: Path) -> trimesh.Scene:
     loaded = trimesh.load(point_cloud_path)
     if not isinstance(loaded, trimesh.points.PointCloud):
@@ -336,6 +405,76 @@ def _build_convex_hull_scene_from_point_cloud(point_cloud_path: Path) -> trimesh
         hull.visual.face_colors = np.tile(np.append(average_color, 255), (len(hull.faces), 1))
 
     return trimesh.Scene([hull])
+
+
+def _build_surface_scene_from_point_cloud(point_cloud_path: Path) -> trimesh.Scene:
+    loaded = trimesh.load(point_cloud_path)
+    if not isinstance(loaded, trimesh.points.PointCloud):
+        raise RuntimeError("COLMAP fused point cloud could not be loaded for surface reconstruction.")
+
+    points = np.asarray(loaded.vertices, dtype=np.float64)
+    if points.shape[0] < 16:
+        raise RuntimeError("COLMAP fused point cloud does not contain enough vertices to build a surface mesh.")
+
+    centered = points - points.mean(axis=0)
+    _, _, vh = np.linalg.svd(centered, full_matrices=False)
+    principal_basis = vh.T
+    pca_points = centered @ principal_basis
+
+    plane_points = pca_points[:, :2]
+    height_values = pca_points[:, 2]
+    rounded_plane_points = np.round(plane_points, decimals=5)
+    unique_plane_points, unique_indices, inverse_indices = np.unique(
+        rounded_plane_points,
+        axis=0,
+        return_index=True,
+        return_inverse=True,
+    )
+
+    if unique_plane_points.shape[0] < 16:
+        raise RuntimeError("Point-cloud surface reconstruction did not retain enough unique projected points.")
+
+    delaunay = Delaunay(unique_plane_points, qhull_options="QJ")
+    candidate_faces = unique_indices[delaunay.simplices]
+
+    triangle_plane_points = plane_points[candidate_faces]
+    edge_lengths = np.stack(
+        [
+            np.linalg.norm(triangle_plane_points[:, 0] - triangle_plane_points[:, 1], axis=1),
+            np.linalg.norm(triangle_plane_points[:, 1] - triangle_plane_points[:, 2], axis=1),
+            np.linalg.norm(triangle_plane_points[:, 2] - triangle_plane_points[:, 0], axis=1),
+        ],
+        axis=1,
+    )
+    max_edge_lengths = edge_lengths.max(axis=1)
+    height_ranges = np.ptp(height_values[candidate_faces], axis=1)
+
+    edge_threshold = np.percentile(max_edge_lengths, 95) * 2.0
+    height_threshold = np.percentile(height_ranges, 95) * 2.0 if np.any(height_ranges) else 0.0
+    valid_faces = max_edge_lengths <= edge_threshold
+    if height_threshold > 0:
+        valid_faces &= height_ranges <= height_threshold
+
+    filtered_faces = candidate_faces[valid_faces]
+    if filtered_faces.size == 0:
+        filtered_faces = candidate_faces
+
+    mesh = trimesh.Trimesh(vertices=points, faces=filtered_faces, process=False)
+    colors = getattr(loaded, "colors", None)
+    if colors is not None and len(colors) == len(points):
+        mesh.visual.vertex_colors = colors
+
+    mesh.remove_degenerate_faces()
+    mesh.remove_duplicate_faces()
+    mesh.remove_unreferenced_vertices()
+    components = mesh.split(only_watertight=False)
+    if components:
+        mesh = max(components, key=lambda component: len(component.faces))
+
+    if mesh.vertices is None or len(mesh.vertices) == 0 or mesh.faces is None or len(mesh.faces) == 0:
+        raise RuntimeError("Point-cloud surface reconstruction collapsed into an empty mesh.")
+
+    return trimesh.Scene([mesh])
 
 
 def _build_delaunay_mesh(colmap_path: str, workspace_root: Path, dense_root: Path) -> Path | None:
@@ -371,7 +510,7 @@ def _run_dense_meshing_pass(
     dense_root: Path,
     *,
     relaxed: bool,
-) -> tuple[Path, Path]:
+) -> tuple[Path, Path, str | None]:
     fused_path = dense_root / ("fused-relaxed.ply" if relaxed else "fused.ply")
     mesh_path = dense_root / ("meshed-poisson-relaxed.ply" if relaxed else "meshed-poisson.ply")
 
@@ -442,20 +581,60 @@ def _run_dense_meshing_pass(
         label="COLMAP stereo fusion (relaxed)" if relaxed else "COLMAP stereo fusion",
     )
 
-    _run_command(
-        [
-            colmap_path,
-            "poisson_mesher",
-            "--input_path",
-            str(fused_path),
-            "--output_path",
-            str(mesh_path),
-        ],
-        cwd=workspace_root,
-        label="COLMAP poisson meshing (relaxed)" if relaxed else "COLMAP poisson meshing",
-    )
+    poisson_note = None
 
-    return fused_path, mesh_path
+    try:
+        _run_command(
+            [
+                colmap_path,
+                "poisson_mesher",
+                "--input_path",
+                str(fused_path),
+                "--output_path",
+                str(mesh_path),
+            ],
+            cwd=workspace_root,
+            label="COLMAP poisson meshing (relaxed)" if relaxed else "COLMAP poisson meshing",
+        )
+    except RuntimeError as error:
+        error_text = str(error)
+        depth_match = re.search(r"Solver depth should not exceed maximum depth:\s*(\d+)\s*<=\s*(\d+)", error_text)
+
+        if depth_match:
+            safe_depth = max(1, int(depth_match.group(2)))
+
+            try:
+                _run_command(
+                    [
+                        colmap_path,
+                        "poisson_mesher",
+                        "--input_path",
+                        str(fused_path),
+                        "--output_path",
+                        str(mesh_path),
+                        "--PoissonMeshing.depth",
+                        str(safe_depth),
+                    ],
+                    cwd=workspace_root,
+                    label="COLMAP poisson meshing (adaptive depth)",
+                )
+                poisson_note = (
+                    f"COLMAP's default Poisson depth was too high for this dense cloud, so the worker retried meshing with depth {safe_depth}. "
+                )
+            except RuntimeError as retry_error:
+                logger.warning("COLMAP poisson meshing retry failed for %s", fused_path, exc_info=True)
+                poisson_note = (
+                    "COLMAP's Poisson mesher crashed even after an adaptive depth retry, so the worker fell back to alternate surface reconstruction from the dense workspace. "
+                    f"Failure: {retry_error}"
+                )
+        else:
+            logger.warning("COLMAP poisson meshing failed for %s", fused_path, exc_info=True)
+            poisson_note = (
+                "COLMAP's Poisson mesher failed, so the worker fell back to alternate surface reconstruction from the dense workspace. "
+                f"Failure: {error}"
+            )
+
+    return fused_path, mesh_path, poisson_note
 
 
 def _convert_mesh_to_glb(
@@ -467,19 +646,31 @@ def _convert_mesh_to_glb(
     scene = _scene_from_mesh_path(mesh_path)
 
     if scene is not None:
-        output_path.write_bytes(scene.export(file_type="glb"))
+        output_path.write_bytes(_scene_to_y_up(scene).export(file_type="glb"))
         return None
 
     fallback_scene = _scene_from_mesh_path(fallback_mesh_path) if fallback_mesh_path else None
     if fallback_scene is not None:
-        output_path.write_bytes(fallback_scene.export(file_type="glb"))
+        output_path.write_bytes(_scene_to_y_up(fallback_scene).export(file_type="glb"))
         return (
             "COLMAP's Poisson mesh output was empty, so the worker exported a Delaunay mesh from the dense workspace instead. "
             "This preserves more observed surface detail than the convex-hull salvage path, but you should still review the mesh for background noise or holes."
         )
 
+    try:
+        point_surface_scene = _build_surface_scene_from_point_cloud(fused_path)
+    except Exception:
+        point_surface_scene = None
+
+    if point_surface_scene is not None:
+        output_path.write_bytes(_scene_to_y_up(point_surface_scene).export(file_type="glb"))
+        return (
+            "COLMAP's Poisson mesh output was empty, and Delaunay meshing was unusable, so the worker built a surface mesh directly from the fused point cloud instead. "
+            "This keeps the observed dish silhouette and height variation better than the convex-hull fallback, but it can still include holes or rough edges."
+        )
+
     fallback_scene = _build_convex_hull_scene_from_point_cloud(fused_path)
-    output_path.write_bytes(fallback_scene.export(file_type="glb"))
+    output_path.write_bytes(_scene_to_y_up(fallback_scene).export(file_type="glb"))
     return (
         "COLMAP's Poisson mesh output was empty, and Delaunay meshing did not produce a usable surface, so the worker built the GLB from the fused point cloud convex hull instead. "
         "This usually means the video had enough overlap for a point cloud but not enough stable surface detail for a clean dense mesh."
@@ -496,6 +687,16 @@ def _should_retry_with_original_frames(error: Exception) -> bool:
         "sparse mapping failed",
     )
     return any(marker in text for marker in retry_markers)
+
+
+def _should_attempt_guided_pass(sampled_frame_paths: SampledFramePaths) -> bool:
+    if sampled_frame_paths.guided_frame_count < MIN_RECONSTRUCTION_FRAMES:
+        return False
+
+    if sampled_frame_paths.original_edge_density <= 0:
+        return True
+
+    return sampled_frame_paths.guided_edge_density >= sampled_frame_paths.original_edge_density * 0.85
 
 
 def _run_colmap_photogrammetry(images_dir: Path, processed_path: Path) -> dict:
@@ -603,7 +804,13 @@ def _run_colmap_photogrammetry(images_dir: Path, processed_path: Path) -> dict:
         label="COLMAP image undistortion",
     )
 
-    fused_path, mesh_path = _run_dense_meshing_pass(
+    if not _directory_has_files(dense_root):
+        logger.warning("COLMAP dense workspace was missing or empty at %s; falling back to proxy geometry.", dense_root)
+        raise RuntimeError(
+            "COLMAP dense workspace was empty, so the reconstruction will fall back to proxy geometry."
+        )
+
+    fused_path, mesh_path, poisson_note = _run_dense_meshing_pass(
         colmap_path,
         workspace_root,
         dense_root,
@@ -614,7 +821,7 @@ def _run_colmap_photogrammetry(images_dir: Path, processed_path: Path) -> dict:
     relaxed_dense_note = None
 
     if _scene_from_mesh_path(chosen_mesh) is None:
-        fused_path, mesh_path = _run_dense_meshing_pass(
+        fused_path, mesh_path, relaxed_poisson_note = _run_dense_meshing_pass(
             colmap_path,
             workspace_root,
             dense_root,
@@ -624,9 +831,9 @@ def _run_colmap_photogrammetry(images_dir: Path, processed_path: Path) -> dict:
         relaxed_dense_note = (
             "The default dense stereo pass produced an empty Poisson mesh, so the worker reran dense reconstruction with relaxed stereo and fusion thresholds before export. "
         )
-
-    if not chosen_mesh.exists():
-        raise RuntimeError("COLMAP completed but the dense mesh output was not found.")
+        if relaxed_poisson_note:
+            note_prefix = f"{poisson_note} " if poisson_note else ""
+            poisson_note = f"{note_prefix}{relaxed_poisson_note}".strip()
 
     delaunay_mesh = _build_delaunay_mesh(colmap_path, workspace_root, dense_root)
     mesh_conversion_note = _convert_mesh_to_glb(
@@ -635,6 +842,9 @@ def _run_colmap_photogrammetry(images_dir: Path, processed_path: Path) -> dict:
         processed_path,
         fallback_mesh_path=delaunay_mesh,
     )
+    if poisson_note:
+        note_prefix = f"{poisson_note} " if poisson_note else ""
+        mesh_conversion_note = f"{note_prefix}{mesh_conversion_note or ''}".strip()
     if relaxed_dense_note:
         mesh_conversion_note = f"{relaxed_dense_note}{mesh_conversion_note or ''}".strip()
     
@@ -645,7 +855,7 @@ def _run_colmap_photogrammetry(images_dir: Path, processed_path: Path) -> dict:
         mesh_conversion_note = f"{note_prefix}{norm_result['message']}"
 
     return {
-        "processedPath": processed_path,
+        "processedPath": relative_upload_path(processed_path),
         "notes": (
             "Video reconstruction completed with COLMAP photogrammetry. "
             "Review scale and orientation before marking the asset as AR-ready because reconstructed meshes keep scene-derived units."
@@ -698,36 +908,32 @@ def _create_proxy_glb(output_path: Path, sampled_frames: list[np.ndarray]) -> tu
 
 def _build_proxy_result(
     processed_path: Path,
-    representative_frame: np.ndarray,
+    thumbnail_frame: np.ndarray,
     frame_count: int,
     duration: float | None,
     validation: dict,
     notes: str,
 ) -> dict:
-    thumbnail_path = save_image_thumbnail(Path(processed_path).stem, Image.fromarray(representative_frame))
+    thumbnail_path = save_image_thumbnail(Path(processed_path).stem, Image.fromarray(thumbnail_frame))
     metadata = inspect_model(processed_path)
 
     return {
-        "processedFileUrl": _public_path("processed", processed_path.name),
-        "thumbnailUrl": _public_path("thumbnails", thumbnail_path.name),
-        "fileName": processed_path.name,
-        "fileType": "model/gltf-binary",
-        "fileSize": processed_path.stat().st_size,
-        "polygonCount": metadata["polygonCount"],
-        "textureCount": metadata["textureCount"],
-        "dimensions": metadata["dimensions"],
+        "status": "PROXY_READY",
+        "processedPath": relative_upload_path(processed_path),
+        "thumbnailPath": relative_upload_path(thumbnail_path),
+        "metadata": metadata,
         "frameCount": frame_count,
         "sourceVideoDuration": round(duration, 2) if duration is not None else None,
         "processingNotes": notes,
         "isOptimized": False,
-        "status": "PROXY_READY",
         "validation": validation,
     }
 
 
 def _build_glb_result(
     processed_path: Path,
-    representative_frame: np.ndarray,
+    processed_relative_path: str,
+    thumbnail_frame: np.ndarray,
     frame_count: int,
     duration: float | None,
     validation: dict,
@@ -735,23 +941,18 @@ def _build_glb_result(
     status: str,
     is_optimized: bool,
 ) -> dict:
-    thumbnail_path = save_image_thumbnail(Path(processed_path).stem, Image.fromarray(representative_frame))
+    thumbnail_path = save_image_thumbnail(Path(processed_path).stem, Image.fromarray(thumbnail_frame))
     metadata = inspect_model(processed_path)
 
     return {
-        "processedFileUrl": _public_path("processed", processed_path.name),
-        "thumbnailUrl": _public_path("thumbnails", thumbnail_path.name),
-        "fileName": processed_path.name,
-        "fileType": "model/gltf-binary",
-        "fileSize": processed_path.stat().st_size,
-        "polygonCount": metadata["polygonCount"],
-        "textureCount": metadata["textureCount"],
-        "dimensions": metadata["dimensions"],
+        "status": status,
+        "processedPath": processed_relative_path,
+        "thumbnailPath": relative_upload_path(thumbnail_path),
+        "metadata": metadata,
         "frameCount": frame_count,
         "sourceVideoDuration": round(duration, 2) if duration is not None else None,
         "processingNotes": notes,
         "isOptimized": is_optimized,
-        "status": status,
         "validation": validation,
     }
 
@@ -782,7 +983,7 @@ def process_video(payload: ProcessVideoRequest) -> dict:
     if not sampled_frames:
         raise ValueError("The uploaded video could not be sampled into usable frames.")
 
-    representative_frame = sampled_frames[len(sampled_frames) // 2]
+    thumbnail_frame = _select_thumbnail_frame(sampled_frames)
     processed_path = settings.processed_dir / f"{payload.modelId}.glb"
     pipeline_health = get_video_pipeline_health()
     requested_mode = pipeline_health["requestedMode"]
@@ -795,24 +996,24 @@ def process_video(payload: ProcessVideoRequest) -> dict:
                 f"but only {len(sampled_frames)} were saved from this video."
             )
 
-            if requested_mode == "photogrammetry":
-                raise ValueError(message)
-
             proxy_path, proxy_notes = _create_proxy_glb(processed_path, sampled_frames)
-            return _build_proxy_result(
+            result = _build_proxy_result(
                 processed_path=proxy_path,
-                representative_frame=representative_frame,
+                thumbnail_frame=thumbnail_frame,
                 frame_count=frame_count,
                 duration=duration,
                 validation=validation,
                 notes=f"{message} Falling back to the proxy GLB pipeline. {proxy_notes}",
             )
+            _cleanup_video_workspace(frames_root)
+            return result
 
         try:
             colmap_result: dict | None = None
             guided_error: Exception | None = None
+            guided_skip_note: str | None = None
 
-            if sampled_frame_paths.guided_frame_count >= MIN_RECONSTRUCTION_FRAMES:
+            if _should_attempt_guided_pass(sampled_frame_paths):
                 try:
                     colmap_result = _run_colmap_photogrammetry(
                         images_dir=sampled_frame_paths.guided_dir,
@@ -826,6 +1027,10 @@ def process_video(payload: ProcessVideoRequest) -> dict:
                     guided_error = error
                     if not _should_retry_with_original_frames(error):
                         raise
+            elif sampled_frame_paths.guided_frame_count > 0:
+                guided_skip_note = (
+                    "The worker skipped the subject-emphasized frame pass because its feature density was too low for reliable COLMAP initialization, so reconstruction started directly from the original sampled frames. "
+                )
 
             if colmap_result is None:
                 colmap_result = _run_colmap_photogrammetry(
@@ -837,9 +1042,12 @@ def process_video(payload: ProcessVideoRequest) -> dict:
                         "Subject-emphasized frames did not yield a stable COLMAP initialization, so the worker retried with the original sampled frames and completed reconstruction from that pass. "
                         f"Guided attempt summary: {guided_error}. {colmap_result['notes']}"
                     )
+                elif guided_skip_note is not None:
+                    colmap_result["notes"] = f"{guided_skip_note}{colmap_result['notes']}"
             result = _build_glb_result(
-                processed_path=colmap_result["processedPath"],
-                representative_frame=representative_frame,
+                processed_path=processed_path,
+                processed_relative_path=colmap_result["processedPath"],
+                thumbnail_frame=thumbnail_frame,
                 frame_count=frame_count,
                 duration=duration,
                 validation=validation,
@@ -850,13 +1058,10 @@ def process_video(payload: ProcessVideoRequest) -> dict:
             _cleanup_video_workspace(frames_root)
             return result
         except Exception as error:
-            if requested_mode == "photogrammetry":
-                raise RuntimeError(f"Photogrammetry reconstruction failed. {error}") from error
-
             proxy_path, proxy_notes = _create_proxy_glb(processed_path, sampled_frames)
             result = _build_proxy_result(
                 processed_path=proxy_path,
-                representative_frame=representative_frame,
+                thumbnail_frame=thumbnail_frame,
                 frame_count=frame_count,
                 duration=duration,
                 validation=validation,
@@ -868,16 +1073,14 @@ def process_video(payload: ProcessVideoRequest) -> dict:
             _cleanup_video_workspace(frames_root)
             return result
 
-    if requested_mode == "photogrammetry":
-        raise RuntimeError(
-            "VIDEO_PIPELINE_MODE is set to photogrammetry, but COLMAP was not found. "
-            "Install COLMAP or set COLMAP_BIN to its executable path."
-        )
-
     proxy_path, proxy_notes = _create_proxy_glb(processed_path, sampled_frames)
     if requested_mode == "proxy":
         notes = (
             "VIDEO_PIPELINE_MODE=proxy is enabled, so the worker intentionally skipped photogrammetry and generated a proxy GLB."
+        )
+    elif requested_mode == "photogrammetry":
+        notes = (
+            "VIDEO_PIPELINE_MODE=photogrammetry was requested, but COLMAP was not available, so the worker generated a proxy GLB instead."
         )
     else:
         notes = (
@@ -886,7 +1089,7 @@ def process_video(payload: ProcessVideoRequest) -> dict:
 
     result = _build_proxy_result(
         processed_path=proxy_path,
-        representative_frame=representative_frame,
+        thumbnail_frame=thumbnail_frame,
         frame_count=frame_count,
         duration=duration,
         validation=validation,

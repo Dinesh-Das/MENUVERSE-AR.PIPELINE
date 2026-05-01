@@ -36,19 +36,22 @@ class DimensionsSchema(BaseModel):
     z: float
 
 
-class WorkerResult(BaseModel):
-    originalFileUrl: str | None = None
-    processedFileUrl: str | None = None
-    thumbnailUrl: str | None = None
-    fileName: str | None = None
-    fileType: str | None = None
+class MetadataSchema(BaseModel):
+    vertexCount: int | None = None
+    faceCount: int | None = None
     fileSize: int | None = None
-    polygonCount: int | None = None
-    textureCount: int | None = None
-    dimensions: DimensionsSchema | None = None
+    boundingBox: DimensionsSchema | None = None
+
+
+# The server patches Prisma records from this camelCase contract, so keep these field names stable.
+class WorkerResult(BaseModel):
+    status: str = "PROCESSED"
+    processedPath: str | None = None
+    thumbnailPath: str | None = None
+    metadata: MetadataSchema | None = None
+    error: str | None = None
     frameCount: int | None = None
     sourceVideoDuration: float | None = None
     processingNotes: str | None = None
     isOptimized: bool = False
-    status: str = "PROCESSED"
     validation: dict[str, Any] | None = None

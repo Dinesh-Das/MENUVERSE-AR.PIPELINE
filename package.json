@@ -13,7 +13,8 @@
     "setup:windows": "powershell -ExecutionPolicy Bypass -File scripts/setup-windows.ps1",
     "start:windows": "powershell -ExecutionPolicy Bypass -File scripts/start-studio.ps1",
     "prisma:migrate": "cmd /c \"cd server && npm run prisma:migrate\"",
-    "prisma:studio": "cmd /c \"cd server && npm run prisma:studio\""
+    "prisma:studio": "cmd /c \"cd server && npm run prisma:studio\"",
+    "kill-ports": "powershell -ExecutionPolicy Bypass -Command \"[4000, 5184, 8001] | ForEach-Object { $pids = @(Get-NetTCPConnection -LocalPort $_ -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique); if ($pids) { Write-Host 'Killing port $_ (PIDs: $pids)'; $pids | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue } } }\""
   },
   "devDependencies": {
     "concurrently": "^9.1.2"

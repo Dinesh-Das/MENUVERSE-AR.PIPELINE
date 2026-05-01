@@ -30,6 +30,7 @@ app.use(cors({
 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+// Assets live under the uploads root, so mount that directory directly at /uploads for all public URLs.
 app.use("/uploads", express.static(path.resolve(env.uploadRoot)));
 
 app.get("/health", (_request, response) => {
