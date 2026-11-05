@@ -21,6 +21,14 @@ def relative_upload_path(file_path: Path) -> str:
     return file_path.resolve().relative_to(settings.upload_root.resolve()).as_posix()
 
 
+def resolve_upload_path(file_path: str) -> Path:
+    path = Path(file_path).resolve()
+    root = settings.upload_root.resolve()
+    if path == root or not path.is_relative_to(root):
+        raise ValueError("The source file must be inside the configured upload directory.")
+    return path
+
+
 def _is_valid_model_signature(path: Path) -> bool:
     try:
         if path.suffix.lower() == ".glb":
@@ -54,7 +62,7 @@ def _inspect_mesh(file_path: Path) -> trimesh.Trimesh | None:
 
 
 def validate_model_path(file_path: str) -> dict:
-    path = Path(file_path).resolve()
+    path = resolve_upload_path(file_path)
     exists = path.exists()
     extension = path.suffix.lower()
 
@@ -127,6 +135,9 @@ def process_model(payload: ProcessModelRequest) -> dict:
         raise ValueError("Only .glb and .gltf files are supported.")
 
     source_path = Path(validation["filePath"])
+    metadata = inspect_model(source_path)
+    if not metadata["vertexCount"] or not metadata["faceCount"]:
+        raise ValueError("The model must contain readable, nonempty geometry.")
     settings.processed_dir.mkdir(parents=True, exist_ok=True)
     settings.thumbnails_dir.mkdir(parents=True, exist_ok=True)
 
@@ -134,7 +145,6 @@ def process_model(payload: ProcessModelRequest) -> dict:
     processed_path = settings.processed_dir / processed_name
     shutil.copy2(source_path, processed_path)
 
-    metadata = inspect_model(processed_path)
     thumbnail = generate_thumbnail(
         GenerateThumbnailRequest(
             filePath=str(source_path),

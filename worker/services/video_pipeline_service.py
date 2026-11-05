@@ -20,7 +20,7 @@ from trimesh.transformations import rotation_matrix
 
 from core.config import settings
 from schemas import ProcessVideoRequest
-from services.model_service import inspect_model, relative_upload_path
+from services.model_service import inspect_model, relative_upload_path, resolve_upload_path
 from services.thumbnail_service import save_image_thumbnail
 
 
@@ -123,7 +123,7 @@ def get_video_pipeline_health() -> dict:
 
 
 def validate_video_path(file_path: str) -> dict:
-    path = Path(file_path).resolve()
+    path = resolve_upload_path(file_path)
     exists = path.exists()
     extension = path.suffix.lower()
 

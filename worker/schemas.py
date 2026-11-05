@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 
 class ProcessModelRequest(BaseModel):
-    modelId: str
+    modelId: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
     name: str
     originalFilePath: str
     fileName: str
@@ -14,7 +14,7 @@ class ProcessModelRequest(BaseModel):
 
 
 class ProcessVideoRequest(BaseModel):
-    modelId: str
+    modelId: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
     name: str
     sourceVideoPath: str
     fileName: str
@@ -27,7 +27,7 @@ class ValidateModelRequest(BaseModel):
 class GenerateThumbnailRequest(BaseModel):
     filePath: str
     name: str = Field(default="Food Model")
-    modelId: str = Field(default="preview")
+    modelId: str = Field(default="preview", pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 
 class DimensionsSchema(BaseModel):
