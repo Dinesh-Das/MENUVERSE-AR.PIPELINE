@@ -1,5 +1,7 @@
 # MenuVerse AR Pipeline
 
+[Interview case study, verification and remaining evidence](INTERVIEW.md)
+
 MenuVerse AR Pipeline is a standalone companion service for managing 3D food assets that can later be consumed by the main Menuverse app over REST. It does not import Menuverse code. Instead, it focuses on a clean upload-to-AR workflow for restaurant and admin teams.
 
 ## Project overview
