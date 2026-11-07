@@ -57,17 +57,13 @@ async function runModelJob(modelId) {
 
 async function drainQueue() {
   while (activeModelIds.size < env.processingConcurrency && queuedModelIds.length > 0) {
-    const nextModelId = queuedModelIds.shift();
-
-    if (!nextModelId) {
-      continue;
-    }
+    // An active model can also have one pending forced retry. Leave it queued
+    // until its attempt finishes, while allowing other eligible IDs to run.
+    const nextIndex = queuedModelIds.findIndex((id) => !activeModelIds.has(id));
+    if (nextIndex === -1) break;
+    const [nextModelId] = queuedModelIds.splice(nextIndex, 1);
 
     queuedModelIdSet.delete(nextModelId);
-
-    if (activeModelIds.has(nextModelId)) {
-      continue;
-    }
 
     activeModelIds.add(nextModelId);
 

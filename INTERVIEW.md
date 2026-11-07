@@ -24,6 +24,8 @@ python -m pytest worker/tests -q -p no:cacheprovider
 
 6 worker tests passed using temporary synthetic assets. The local run used bundled Python 3.12 plus the worker's existing .python-packages because its venv launcher was stale.
 
+On 2026-11-07, 10 worker tests passed, including upload-contained secondary buffers/textures and a processed GLB that still loads after its source sidecars are removed. Both queue concurrency regressions passed after reproducing the lost retry at concurrency 2. The queue tests import the real module with only Prisma/worker/environment boundaries mocked (`cd server && npm test` using Node 24's experimental module-mock flag). Model output is a static self-contained GLB; animations and unsupported extensions are not guaranteed. Native mobile AR and photogrammetry quality were not evaluated.
+
 Behavioral regressions were reproduced before their fixes. Passing contract tests demonstrate the named behavior; they are not an AI accuracy rating.
 
 ## Defensible resume wording
