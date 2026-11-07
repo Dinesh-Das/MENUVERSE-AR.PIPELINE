@@ -89,7 +89,7 @@ That setup script:
 
 ### Manual setup
 
-1. Install Node.js 20+ and Python 3.10+.
+1. Install Node.js 20+ and Python 3.10+. Use Node.js 24 LTS for the verified development/test commands; the server regressions use experimental module mocks.
 2. Install root dependencies:
    - `cmd /c npm install`
 3. Install client and server dependencies:
@@ -241,7 +241,7 @@ See [API.md](D:/MyProjects/menu-verse-arpipeline/docs/API.md) for request and re
 2. Express persists the asset and creates a `FoodModel` record.
 3. Express queues the model for background processing and returns immediately to the UI.
 4. The server queue sends one job at a time to the FastAPI worker by default.
-5. For model uploads, the worker validates the file, inspects it, and copies it to the processed directory.
+5. For model uploads, the worker validates and inspects a static scene, resolves resources only inside the configured upload root, and packages a self-contained GLB in the processed directory. External URLs and resources escaping uploads are rejected. The single-file upload UI expects a GLB or embedded-resource glTF; sidecars are only supported when already present under the worker's upload root. Trimesh export does not guarantee preservation of animations or unsupported extensions.
 6. For video uploads, the worker samples frames, tries COLMAP photogrammetry, converts the resulting mesh to `GLB`, and falls back to a proxy `GLB` only when the toolchain is unavailable or the reconstruction fails.
 7. The worker updates the record to `PROCESSED`, `PROXY_READY`, or `FAILED`.
 8. Operator reviews the result, adjusts transform metadata, and marks it `AR_READY`.

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import shutil
 from pathlib import Path
 
 import trimesh
@@ -9,6 +8,7 @@ import trimesh
 from core.config import settings
 from schemas import GenerateThumbnailRequest, ProcessModelRequest
 from services.thumbnail_service import generate_placeholder_thumbnail
+from services.asset_resolver import UploadAssetResolver
 
 
 ALLOWED_EXTENSIONS = {".glb", ".gltf"}
@@ -55,8 +55,16 @@ def _coerce_loaded_to_mesh(loaded: object) -> trimesh.Trimesh | None:
     return None
 
 
+def _load_scene(file_path: Path) -> trimesh.Scene:
+    resolver = UploadAssetResolver(file_path.parent, settings.upload_root)
+    loaded = trimesh.load(file_path, force="scene", resolver=resolver)
+    if resolver.failures:
+        raise ValueError("The model contains missing or disallowed asset resources.")
+    return loaded
+
+
 def _inspect_mesh(file_path: Path) -> trimesh.Trimesh | None:
-    loaded = trimesh.load(file_path, force="mesh")
+    loaded = _load_scene(file_path)
     # Some GLBs still come back as Scene objects, so flatten them before reading vertices/faces.
     return _coerce_loaded_to_mesh(loaded)
 
@@ -141,9 +149,12 @@ def process_model(payload: ProcessModelRequest) -> dict:
     settings.processed_dir.mkdir(parents=True, exist_ok=True)
     settings.thumbnails_dir.mkdir(parents=True, exist_ok=True)
 
-    processed_name = f"{payload.modelId}{source_path.suffix.lower()}"
+    # Package geometry and resolved textures/buffers into one portable asset.
+    # Copying just a glTF JSON file loses its relative dependencies.
+    scene = _load_scene(source_path)
+    processed_name = f"{payload.modelId}.glb"
     processed_path = settings.processed_dir / processed_name
-    shutil.copy2(source_path, processed_path)
+    scene.export(processed_path, file_type="glb")
 
     thumbnail = generate_thumbnail(
         GenerateThumbnailRequest(
@@ -158,7 +169,7 @@ def process_model(payload: ProcessModelRequest) -> dict:
         "processedPath": relative_upload_path(processed_path),
         "thumbnailPath": thumbnail["thumbnailPath"],
         "metadata": metadata,
-        "processingNotes": "Uploaded model validated and copied into the processed directory.",
+        "processingNotes": "Uploaded static model validated and packaged as a self-contained GLB.",
         "validation": validation,
         "isOptimized": False,
     }
